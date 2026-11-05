@@ -7,6 +7,19 @@ import streamlit as st
 st.set_page_config(page_title="高校野球レーティング", layout="wide",
                    initial_sidebar_state="collapsed")
 
+st.markdown("""
+<style>
+@media (max-width: 640px) {
+  .block-container { padding: 1rem 0.6rem 3rem 0.6rem; }
+  h1 { font-size: 1.4rem !important; }
+  h2, h3 { font-size: 1.1rem !important; }
+  [data-testid="stMetricValue"] { font-size: 1.1rem; }
+  [data-testid="stMetricLabel"] { font-size: 0.75rem; }
+  button[data-baseweb="tab"] { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 NAT = {"選抜", "夏の甲子園", "神宮大会", "甲子園交流試合"}
 
 
@@ -29,6 +42,8 @@ def load():
         df["rank_" + c] = df[c].rank(ascending=False, method="min")
         df["prank_" + c] = df.groupby("pref")[c].rank(
             ascending=False, method="min")
+    if "閉校月" in df.columns:
+        df["閉校月"] = df["閉校月"].fillna("")
     return df, mcols
 
 
@@ -49,14 +64,6 @@ tlabels = ["最新"] + mlabels
 
 def colof(t):
     return "rating" if t == "最新" else "M_" + t
-
-
-def rankof(t):
-    return "rank_now" if t == "最新" else "rank_M_" + t
-
-
-def prankof(t):
-    return "prank_now" if t == "最新" else "prank_M_" + t
 
 
 def expand(rows, keys):
@@ -86,6 +93,9 @@ max_rd = st.sidebar.slider("RD上限", 0, rd_max, rd_max)
 kw = st.sidebar.text_input("学校名で検索")
 
 f = df[df["region"].isin(sel_reg)]
+if "閉校月" in f.columns and mlabels:
+    _last = max(mlabels)
+    f = f[(f["閉校月"] == "") | (f["閉校月"] > _last)]
 if sel_pref:
     f = f[f["pref"].isin(sel_pref)]
 f = f[(f["games"] >= min_games) & (f["rd_out"] <= max_rd)]
@@ -94,38 +104,85 @@ if kw:
 
 st.title("高校野球レーティング")
 st.caption(f"絞り込み後 {len(f)} 校 / 全 {len(df)} 校。"
-           "月初の値は月ごとに全校平均を1500に揃えています。")
+           "月初の値は月ごとに全校平均を1500に揃えています。"
+           "ランキングの月初時点は当時の校名で表示します。")
 
 tabs = st.tabs(["ランキング", "推移比較", "学校詳細", "都道府県詳細", "大会結果"])
 
 # ---------- 1. ランキング ----------
 with tabs[0]:
+    if sel_pref:
+        scope = "県内順位"
+    elif len(sel_reg) < len(regions):
+        scope = "地区順位"
+    else:
+        scope = "全国順位"
+    st.caption("順位の基準:" + scope + "(サイドバーの絞り込みに連動)")
+
     c1, c2, c3 = st.columns(3)
     t_sel = c1.selectbox("時点", tlabels, index=0, key="rk_time")
     t_cmp = c2.selectbox("比較時点(順位の増減)", ["なし"] + tlabels, key="rk_cmp")
     n_show = c3.slider("表示件数", 10, 300, 50, key="rk_n")
-    col, rcol, pcol = colof(t_sel), rankof(t_sel), prankof(t_sel)
-    t = f[f[col].notna()].copy()
-    t = t.sort_values(col, ascending=False).reset_index(drop=True)
-    t.insert(0, "絞込順位", t.index + 1)
-    t["全国順位"] = t[rcol].astype(int)
-    t["県内順位"] = t[pcol].astype(int)
-    t["レーティング"] = t[col].round(1)
-    show = ["絞込順位", "全国順位", "県内順位", "team", "pref", "region",
-            "レーティング"]
-    if t_cmp != "なし":
-        t["比較時点の全国順位"] = t[rankof(t_cmp)]
-        t["順位増減(+は上昇)"] = t["比較時点の全国順位"] - t["全国順位"]
-        t["比較時点の県内順位"] = t[prankof(t_cmp)]
-        t["県内順位増減(+は上昇)"] = t["比較時点の県内順位"] - t["県内順位"]
-        show += ["比較時点の全国順位", "順位増減(+は上昇)",
-                 "比較時点の県内順位", "県内順位増減(+は上昇)"]
+    compact = st.checkbox("スマホ向け(列を絞る)", value=False, key="rk_compact")
+
+    def rank_in(frame, tl):
+        """絞り込み後の学校だけで順位を付け、その時点の校名を付ける"""
+        c = colof(tl)
+        x = frame[frame[c].notna()].copy()
+        x["順位"] = x[c].rank(ascending=False, method="min").astype(int)
+        x["レーティング"] = x[c].round(1)
+        nc = "N_" + tl
+        if tl != "最新" and nc in x.columns:
+            x["校名"] = x[nc].fillna(x["team"])
+        else:
+            x["校名"] = x["team"]
+        return x.sort_values("順位")
+
+    t = rank_in(f, t_sel)
+    t = t.rename(columns={"順位": scope})
+    show = [scope, "校名", "pref", "region", "レーティング"]
     if t_sel == "最新":
         show += ["rd_out", "games", "W", "L"]
-    st.dataframe(t[show].head(n_show), hide_index=True)
+    if t_cmp != "なし":
+        tc = rank_in(f, t_cmp).set_index("school_id")["順位"]
+        t["比較時点の順位"] = t["school_id"].map(tc)
+        t["順位増減(+は上昇)"] = t["比較時点の順位"] - t[scope]
+        show += ["比較時点の順位", "順位増減(+は上昇)"]
     st.download_button("この表をCSV保存",
                        t[show].to_csv(index=False).encode("utf-8-sig"),
                        "ranking_" + t_sel + ".csv", "text/csv")
+    if compact:
+        show = [scope, "校名", "pref", "レーティング"]
+    st.dataframe(t[show].head(n_show), hide_index=True,
+                 use_container_width=True)
+
+    st.subheader("時点別ランキング比較(横:日付、縦:順位)")
+    d1, d2 = st.columns(2)
+    default_t = tlabels[-4:] if len(tlabels) > 4 else tlabels
+    pick_t = d1.multiselect("表示する時点", tlabels, default=default_t,
+                            key="rk_cols")
+    top_n = d2.slider("上位N位", 5, 100, 20, key="rk_topn")
+    if not pick_t:
+        st.info("時点を選んでください。")
+    else:
+        cols_t = {}
+        for tl in pick_t:
+            x = rank_in(f, tl)
+            x = x[x["順位"] <= top_n]
+            cell = {}
+            for _, rw in x.iterrows():
+                txt = f"{rw['校名']} ({rw['レーティング']:.1f})"
+                if rw["順位"] in cell:
+                    cell[rw["順位"]] += " / " + txt
+                else:
+                    cell[rw["順位"]] = txt
+            cols_t[tl] = pd.Series(cell)
+        cmp_df = pd.DataFrame(cols_t).reindex(range(1, top_n + 1)).fillna("")
+        cmp_df.index.name = scope
+        st.dataframe(cmp_df, use_container_width=True)
+        st.download_button("比較表をCSV保存",
+                           cmp_df.to_csv().encode("utf-8-sig"),
+                           "ranking_compare.csv", "text/csv")
 
 # ---------- 2. 推移比較 ----------
 with tabs[1]:
@@ -167,11 +224,12 @@ with tabs[1]:
                           markers=True, title=metric + "の推移")
             if metric != "レーティング":
                 fig.update_yaxes(autorange="reversed")
-            fig.update_layout(xaxis_title="", height=600,
-                              legend=dict(orientation="h", y=-0.25))
-            st.plotly_chart(fig)
+            fig.update_layout(xaxis_title="", height=420,
+                              legend=dict(orientation="h", y=-0.3))
+            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(long.pivot(index="label", columns="month",
-                                    values=metric).round(1))
+                                    values=metric).round(1),
+                         use_container_width=True)
 
 # ---------- 3. 学校詳細 ----------
 with tabs[2]:
@@ -179,7 +237,8 @@ with tabs[2]:
     one = st.selectbox("学校を選択", names, key="dt_school")
     r = df[df["label"] == one].iloc[0]
     sid = int(r["school_id"])
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3 = st.columns(3)
+    m4, m5 = st.columns(2)
     m1.metric("レーティング", f"{r['rating']:.1f}")
     m2.metric("全国順位", f"{int(r['rank_now'])} / {len(df)}")
     npref = int((df["pref"] == r["pref"]).sum())
@@ -187,11 +246,26 @@ with tabs[2]:
     m4.metric("勝-敗", f"{int(r['W'])}-{int(r['L'])}")
     m5.metric("RD(不確かさ)", f"{r['rd_out']:.1f}")
 
+    # 統合前の旧ID(元ID)と当時の校名の一覧
+    ids = []
+    if stt is not None:
+        ss_ = stt[stt["現ID"] == sid].sort_values("最終戦日")
+        if not ss_.empty:
+            g_ = ss_.groupby("ID").agg(first=("初戦日", "min"),
+                                       name=("校名", "last"))
+            g_ = g_.sort_values("first")
+            ids = [(int(i), n) for i, n in zip(g_.index, g_["name"])]
+    merged = len(ids) > 1
+    if merged:
+        st.info("統合校です。統合前の学校ごとに表を分けて表示します:"
+                + " → ".join(n + "(ID " + str(i) + ")" for i, n in ids))
+
     sub_t = st.tabs(["レーティング推移", "学校ページ(大会別成績)", "学校→試合"])
 
     with sub_t[0]:
         hist = pd.DataFrame({
             "時点": mlabels,
+            "当時の校名": [r.get("N_" + m) for m in mlabels],
             "レーティング": [r["M_" + m] for m in mlabels],
             "全国順位": [r["rank_M_" + m] for m in mlabels],
             "県内順位": [r["prank_M_" + m] for m in mlabels]})
@@ -199,7 +273,6 @@ with tabs[2]:
         if hist.empty:
             st.info("月初の記録がありません。")
         else:
-            g1, g2, g3 = st.columns(3)
             fig1 = px.line(hist, x="時点", y="レーティング", markers=True,
                            title="レーティング推移")
             fig2 = px.line(hist, x="時点", y="全国順位", markers=True,
@@ -208,10 +281,22 @@ with tabs[2]:
             fig3 = px.line(hist, x="時点", y="県内順位", markers=True,
                            title="県内順位の推移")
             fig3.update_yaxes(autorange="reversed")
-            g1.plotly_chart(fig1)
-            g2.plotly_chart(fig2)
-            g3.plotly_chart(fig3)
-            st.dataframe(hist.round(1), hide_index=True)
+            for fg in (fig1, fig2, fig3):
+                fg.update_layout(height=320)
+            st.plotly_chart(fig1, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig3, use_container_width=True)
+            hn = [x for x in hist["当時の校名"].dropna().unique()]
+            if len(hn) > 1:
+                st.caption("レーティングは統合後も1本の値として更新されています。"
+                           "表は当時の校名ごとに区切っています。")
+                for nm in hn:
+                    st.markdown("**" + str(nm) + "** の時期")
+                    st.dataframe(hist[hist["当時の校名"] == nm].round(1),
+                                 hide_index=True, use_container_width=True)
+            else:
+                st.dataframe(hist.round(1), hide_index=True,
+                             use_container_width=True)
 
     with sub_t[1]:
         if stt is None:
@@ -226,39 +311,72 @@ with tabs[2]:
                                         key="sc_kinds")
                 s = s[s["大会種別"].isin(pick_k)].sort_values(
                     ["年", "初戦日"], ascending=[False, False])
-                a, b, c = st.columns(3)
-                a.metric("出場大会数", len(s))
-                b.metric("優勝", int((s["結果"] == "優勝").sum()))
-                c.metric("準優勝", int((s["結果"] == "準優勝").sum()))
-                cols = ["年", "大会種別", "大会名", "結果", "最終ラウンド",
+                cols = ["年", "大会種別", "大会名", "校名", "結果", "最終ラウンド",
                         "試合数", "勝", "敗", "総得点", "総失点", "初戦日", "最終戦日"]
-                st.caption("黄色の太字の行は全国大会(選抜・夏の甲子園・神宮大会など)です。")
-                st.dataframe(s[cols].reset_index(drop=True).style.apply(hl, axis=1),
-                             hide_index=True)
+                st.caption("黄色の太字の行は全国大会(選抜・夏の甲子園・神宮大会など)です。校名は当時のものです。")
+                groups = ids if merged else [(None, None)]
+                for gid, gname in groups:
+                    part = s if gid is None else s[s["ID"] == gid]
+                    if merged:
+                        st.markdown("### " + str(gname) + "(ID " + str(gid) + ")")
+                    a, b, c = st.columns(3)
+                    a.metric("出場大会数", len(part))
+                    b.metric("優勝", int((part["結果"] == "優勝").sum()))
+                    c.metric("準優勝", int((part["結果"] == "準優勝").sum()))
+                    if part.empty:
+                        st.info("該当なし")
+                    else:
+                        st.dataframe(
+                            part[cols].reset_index(drop=True).style.apply(hl, axis=1),
+                            hide_index=True, use_container_width=True)
+                if merged:
+                    st.markdown("### 合計(統合後)")
+                    a, b, c = st.columns(3)
+                    a.metric("出場大会数", len(s))
+                    b.metric("優勝", int((s["結果"] == "優勝").sum()))
+                    c.metric("準優勝", int((s["結果"] == "準優勝").sum()))
 
     with sub_t[2]:
         if tgm is None:
             st.warning("output/tournament_games.csv がありません。")
         else:
-            gm = tgm[(tgm["校1現ID"] == sid) | (tgm["校2現ID"] == sid)].copy()
-            if gm.empty:
+            gm_all = tgm[(tgm["校1現ID"] == sid) | (tgm["校2現ID"] == sid)].copy()
+            if gm_all.empty:
                 st.info("この学校の試合はありません。")
             else:
-                first = gm["校1現ID"] == sid
-                gm["相手"] = gm["校2"].where(first, gm["校1"])
-                gm["相手県"] = gm["校2県"].where(first, gm["校1県"])
-                gm["自得点"] = gm["得点1"].where(first, gm["得点2"])
-                gm["相手得点"] = gm["得点2"].where(first, gm["得点1"])
-                gm["結果"] = (gm["自得点"] > gm["相手得点"]).map({True: "○", False: "●"})
-                gm["スコア"] = gm["自得点"].astype(str) + "-" + gm["相手得点"].astype(str)
-                gy = sorted(gm["年"].unique(), reverse=True)
+                gy = sorted(gm_all["年"].unique(), reverse=True)
                 sel_y = st.multiselect("年", gy, default=gy, key="gm_years")
-                gm = gm[gm["年"].isin(sel_y)].sort_values(
-                    ["日付", "ラウンド順"], ascending=[False, False])
-                st.caption(f"{len(gm)}試合 / {int((gm['結果'] == '○').sum())}勝"
-                           f"{int((gm['結果'] == '●').sum())}敗")
-                st.dataframe(gm[["日付", "大会名", "ラウンド", "結果", "スコア",
-                                 "相手", "相手県"]], hide_index=True)
+
+                def game_table(base, oid):
+                    gm = base.copy()
+                    if oid is not None:
+                        gm = gm[(gm["校1ID"] == oid) | (gm["校2ID"] == oid)]
+                        first = gm["校1ID"] == oid
+                    else:
+                        first = gm["校1現ID"] == sid
+                    gm["自校"] = gm["校1"].where(first, gm["校2"])
+                    gm["相手"] = gm["校2"].where(first, gm["校1"])
+                    gm["相手県"] = gm["校2県"].where(first, gm["校1県"])
+                    gm["自得点"] = gm["得点1"].where(first, gm["得点2"])
+                    gm["相手得点"] = gm["得点2"].where(first, gm["得点1"])
+                    gm["結果"] = (gm["自得点"] > gm["相手得点"]).map(
+                        {True: "○", False: "●"})
+                    gm["スコア"] = (gm["自得点"].astype(str) + "-"
+                                 + gm["相手得点"].astype(str))
+                    gm = gm[gm["年"].isin(sel_y)].sort_values(
+                        ["日付", "ラウンド順"], ascending=[False, False])
+                    return gm
+
+                groups = ids if merged else [(None, None)]
+                for gid, gname in groups:
+                    gm = game_table(gm_all, gid)
+                    if merged:
+                        st.markdown("### " + str(gname) + "(ID " + str(gid) + ")")
+                    st.caption(f"{len(gm)}試合 / {int((gm['結果'] == '○').sum())}勝"
+                               f"{int((gm['結果'] == '●').sum())}敗(校名は当時のもの)")
+                    st.dataframe(gm[["日付", "大会名", "ラウンド", "自校", "結果",
+                                     "スコア", "相手", "相手県"]],
+                                 hide_index=True, use_container_width=True)
 
 # ---------- 4. 都道府県詳細 ----------
 with tabs[3]:
@@ -283,8 +401,7 @@ with tabs[3]:
 
         st.subheader("県大会の結果(優勝・準優勝・ベスト4・ベスト8)")
         pk = ["春季県大会", "夏の地方大会", "夏(独自大会)", "秋季県大会"]
-        want = ["優勝", "準優勝", "ベスト4", "ベスト8"]
-        sk = sp[sp["大会種別"].isin(pk) & sp["結果"].isin(want)]
+        sk = sp[sp["大会種別"].isin(pk)]
         ysel = sorted(sk["年"].unique(), reverse=True)
         ypick = st.multiselect("年", ysel, default=ysel, key="pf_years")
         kpick = st.multiselect("大会種別", pk, default=pk, key="pf_kinds")
@@ -298,12 +415,24 @@ with tabs[3]:
                     return d[d["結果"] == res]["校名"].tolist()
                 w1 = lst("優勝")
                 w2 = lst("準優勝")
+                note = ""
+                if len(w1) == 0:
+                    note = "優勝校なし(打ち切り・未実施・データなし)"
+                elif len(w1) > 1:
+                    note = "複数校優勝"
                 rows.append(dict(
                     最終戦日=str(d["最終戦日"].max()), 年=y, 大会種別=k, 大会名=nm,
-                    優勝=w1[0] if w1 else "", 準優勝=w2[0] if w2 else "",
+                    優勝="、".join(w1), 準優勝="、".join(w2), 備考=note,
                     b4=lst("ベスト4"), b8=lst("ベスト8")))
+            for r_ in rows:
+                if len(r_["b4"]) >= 3:
+                    r_["b4"] = ["、".join(r_["b4"])]
+                if len(r_["b8"]) >= 5:
+                    r_["b8"] = ["、".join(r_["b8"])]
             tb = expand(rows, {"b4": "ベスト4-", "b8": "ベスト8-"})
             tb = tb.sort_values("最終戦日", ascending=not order_new)
+            cols_ = [c for c in tb.columns if c != "備考"] + ["備考"]
+            tb = tb[cols_]
             st.dataframe(tb, hide_index=True)
 
         st.subheader("都道府県代表の地区大会・全国大会の成績")
@@ -316,97 +445,106 @@ with tabs[3]:
             kp2 = [k for k in hk if k in set(hp["大会種別"])]
             kk = st.multiselect("大会種別 ", kp2, default=kp2, key="pf_kinds2")
             hp = hp[hp["大会種別"].isin(kk)].sort_values(
-                ["最終戦日", "大会ID"], ascending=not order_new)
+                ["最終戦日", "大会ID"], ascending=not order_new).copy()
+            is_ex = hp["大会種別"] == "甲子園交流試合"
+            hp.loc[is_ex, "結果"] = hp.loc[is_ex, "結果"].astype(str).map(
+                lambda v: "勝利" if "勝ち" in v else "敗戦")
             st.caption("黄色の太字の行は全国大会です。")
             cols2 = ["最終戦日", "年", "大会種別", "大会名", "校名", "結果",
                      "最終ラウンド", "試合数", "勝", "敗"]
             st.dataframe(hp[cols2].reset_index(drop=True).style.apply(hl, axis=1),
-                         hide_index=True)
+                         hide_index=True, use_container_width=True)
 
 # ---------- 5. 大会結果 ----------
 with tabs[4]:
     if stt is None or tms is None:
         st.warning("school_tournament.csv / tournament_master.csv がありません。")
     else:
-        kinds_all = ["夏の甲子園", "選抜", "神宮大会", "春季地区大会", "秋季地区大会",
-                     "春季県大会", "夏の地方大会", "秋季県大会"]
+        kinds_all = ["夏の甲子園", "選抜", "神宮大会", "甲子園交流試合",
+                     "春季地区大会", "秋季地区大会"]
         kinds_all = [k for k in kinds_all if k in set(stt["大会種別"])]
         kind = st.selectbox("大会種別", kinds_all, key="tn_kind")
-        is_pref = kind in ("春季県大会", "夏の地方大会", "秋季県大会")
         is_reg = kind in ("春季地区大会", "秋季地区大会")
         sub = stt[stt["大会種別"] == kind].copy()
 
-        c1, c2 = st.columns(2)
-        ys = sorted(sub["年"].unique(), reverse=True)
-        ysel2 = c1.multiselect("年", ys, default=ys, key="tn_years")
-        sub = sub[sub["年"].isin(ysel2)]
-
-        if is_pref:
-            pl = ["すべて"] + sorted(sub["都道府県"].dropna().unique())
-            pp = c2.selectbox("都道府県", pl, key="tn_pref")
-            if pp != "すべて":
-                sub = sub[sub["都道府県"] == pp]
-        elif is_reg:
-            # 大会ごとの地区 = 出場校の地区の最頻値
-            rmap = sub.groupby(["年", "大会ID"])["地区"].agg(
-                lambda s: s.mode().iloc[0] if len(s.mode()) else "")
-            sub["大会地区"] = [rmap.get((a, b), "")
-                           for a, b in zip(sub["年"], sub["大会ID"])]
-            rl = ["すべて"] + sorted([x for x in sub["大会地区"].unique() if x])
-            rr = c2.selectbox("地区", rl, key="tn_region")
-            if rr != "すべて":
-                sub = sub[sub["大会地区"] == rr]
-
-        rows = []
-        for (y, tid, nm), d in sub.groupby(["年", "大会ID", "大会名"]):
-            def lab(x):
-                if is_pref:
-                    return str(x["校名"])
-                return str(x["校名"]) + "(" + str(x["都道府県"]) + ")"
-
-            def lst(res):
-                return [lab(x) for _, x in d[d["結果"] == res].iterrows()]
-            w1 = lst("優勝")
-            w2 = lst("準優勝")
-            row = dict(年度=y, 大会名=nm)
-            if is_pref:
-                row["都道府県"] = str(d["都道府県"].iloc[0])
-            if is_reg:
-                row["地区"] = str(d["大会地区"].iloc[0])
-            row.update(優勝=w1[0] if w1 else "", 準優勝=w2[0] if w2 else "",
-                       b4=lst("ベスト4"), b8=lst("ベスト8"))
-            row["_id"] = tid
-            rows.append(row)
-
-        if not rows:
-            st.info("該当なし")
+        if kind == "甲子園交流試合":
+            if tgm is None:
+                st.warning("tournament_games.csv がありません。")
+            else:
+                gg = tgm[tgm["大会種別"] == "甲子園交流試合"].sort_values(
+                    ["年", "日付", "ラウンド順"])
+                gg = gg.assign(
+                    スコア=gg["得点1"].astype(str) + "-" + gg["得点2"].astype(str),
+                    校1表示=gg["校1"] + "(" + gg["校1県"].astype(str) + ")",
+                    校2表示=gg["校2"] + "(" + gg["校2県"].astype(str) + ")")
+                ys = sorted(gg["年"].unique(), reverse=True)
+                ysel2 = st.multiselect("年", ys, default=ys, key="tn_years_ex")
+                gg = gg[gg["年"].isin(ysel2)]
+                st.caption("優勝・準優勝のない交流試合です。全試合の結果を表示します。")
+                st.dataframe(gg[["年", "日付", "校1表示", "スコア", "校2表示", "勝者"]]
+                             .rename(columns={"校1表示": "校1", "校2表示": "校2"}),
+                             hide_index=True, use_container_width=True)
         else:
-            keys = {"b4": "ベスト4-", "b8": "ベスト8-"}
-            tb = expand(rows, keys).sort_values(["年度", "_id"],
-                                               ascending=[False, True])
-            tb = tb.drop(columns="_id")
-            st.dataframe(tb, hide_index=True)
-            st.download_button("この表をCSV保存",
-                               tb.to_csv(index=False).encode("utf-8-sig"),
-                               "tournament_" + kind + ".csv", "text/csv")
+            c1, c2 = st.columns(2)
+            ys = sorted(sub["年"].unique(), reverse=True)
+            ysel2 = c1.multiselect("年", ys, default=ys, key="tn_years")
+            sub = sub[sub["年"].isin(ysel2)]
 
-            if tgm is not None:
-                with st.expander("個別の大会の試合結果を見る"):
-                    cand = sub[["年", "大会ID", "大会名"]].drop_duplicates()
-                    cand = cand.sort_values(["年", "大会ID"], ascending=[False, True])
-                    opts = [str(a) + " " + b + " (" + str(c) + ")"
-                            for a, b, c in zip(cand["年"], cand["大会名"], cand["大会ID"])]
-                    if opts:
-                        pick = st.selectbox("大会", opts, key="tn_one")
-                        i = opts.index(pick)
-                        yy, ti = int(cand.iloc[i]["年"]), int(cand.iloc[i]["大会ID"])
-                        gg = tgm[(tgm["年"] == yy) & (tgm["大会ID"] == ti)].sort_values(
-                            ["日付", "ラウンド順"])
-                        gg = gg.assign(スコア=gg["得点1"].astype(str) + "-"
-                                       + gg["得点2"].astype(str))
-                        rds = ["すべて"] + list(dict.fromkeys(gg["ラウンド"]))
-                        rsel = st.selectbox("ラウンド", rds, key="tn_round")
-                        if rsel != "すべて":
-                            gg = gg[gg["ラウンド"] == rsel]
-                        st.dataframe(gg[["日付", "ラウンド", "校1", "スコア", "校2", "勝者"]],
-                                     hide_index=True)
+            if is_reg:
+                rmap = sub.groupby(["年", "大会ID"])["地区"].agg(
+                    lambda s: s.mode().iloc[0] if len(s.mode()) else "")
+                sub["大会地区"] = [rmap.get((a, b), "")
+                               for a, b in zip(sub["年"], sub["大会ID"])]
+                rl = ["すべて"] + sorted([x for x in sub["大会地区"].unique() if x])
+                rr = c2.selectbox("地区", rl, key="tn_region")
+                if rr != "すべて":
+                    sub = sub[sub["大会地区"] == rr]
+
+            rows = []
+            for (y, tid, nm), d in sub.groupby(["年", "大会ID", "大会名"]):
+                def lab(x):
+                    return str(x["校名"]) + "(" + str(x["都道府県"]) + ")"
+
+                def lst(res):
+                    return [lab(x) for _, x in d[d["結果"] == res].iterrows()]
+                w1 = lst("優勝")
+                w2 = lst("準優勝")
+                row = dict(年度=y, 大会名=nm)
+                if is_reg:
+                    row["地区"] = str(d["大会地区"].iloc[0])
+                row.update(優勝="、".join(w1), 準優勝="、".join(w2),
+                           b4=lst("ベスト4"), b8=lst("ベスト8"))
+                row["_id"] = tid
+                rows.append(row)
+
+            if not rows:
+                st.info("該当なし")
+            else:
+                tb = expand(rows, {"b4": "ベスト4-", "b8": "ベスト8-"}).sort_values(
+                    ["年度", "_id"], ascending=[False, True])
+                tb = tb.drop(columns="_id")
+                st.dataframe(tb, hide_index=True)
+                st.download_button("この表をCSV保存",
+                                   tb.to_csv(index=False).encode("utf-8-sig"),
+                                   "tournament_" + kind + ".csv", "text/csv")
+
+                if tgm is not None:
+                    with st.expander("個別の大会の試合結果を見る"):
+                        cand = sub[["年", "大会ID", "大会名"]].drop_duplicates()
+                        cand = cand.sort_values(["年", "大会ID"], ascending=[False, True])
+                        opts = [str(a) + " " + b + " (" + str(c) + ")"
+                                for a, b, c in zip(cand["年"], cand["大会名"], cand["大会ID"])]
+                        if opts:
+                            pick = st.selectbox("大会", opts, key="tn_one")
+                            i = opts.index(pick)
+                            yy, ti = int(cand.iloc[i]["年"]), int(cand.iloc[i]["大会ID"])
+                            gg = tgm[(tgm["年"] == yy) & (tgm["大会ID"] == ti)].sort_values(
+                                ["日付", "ラウンド順"])
+                            gg = gg.assign(スコア=gg["得点1"].astype(str) + "-"
+                                           + gg["得点2"].astype(str))
+                            rds = ["すべて"] + list(dict.fromkeys(gg["ラウンド"]))
+                            rsel = st.selectbox("ラウンド", rds, key="tn_round")
+                            if rsel != "すべて":
+                                gg = gg[gg["ラウンド"] == rsel]
+                            st.dataframe(gg[["日付", "ラウンド", "校1", "スコア", "校2", "勝者"]],
+                                         hide_index=True, use_container_width=True)
